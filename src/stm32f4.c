@@ -201,6 +201,8 @@ static int stm32f4_flash_erase(struct target_s *target, uint32_t addr, int len)
 
 	addr &= 0x07FFC000;
 
+//	gdb_outf("flash_erase: %08x %08lx\n", addr, len);
+
 	stm32f4_flash_unlock(ap);
 
 	while(len) {
@@ -248,6 +250,13 @@ static int stm32f4_flash_write(struct target_s *target, uint32_t dest,
 	uint32_t data[2 + words];
 	uint16_t sr;
 
+//	gdb_outf("flash_write: %08x <= %p %08lx\n", dest, src, len);
+
+	if(target_check_error(target)) {
+//          gdb_out ("flash_write: target error before start\n");
+		return -2;
+        }
+
 	/* Construct data buffer used by stub */
 	data[0] = dest - offset;
 	data[1] = words * 4;		/* length must always be a multiple of 4 */
@@ -260,7 +269,7 @@ static int stm32f4_flash_write(struct target_s *target, uint32_t dest,
 	target_mem_write_words(target, 0x20000030, data, sizeof(data));
 	target_pc_write(target, 0x20000000);
 	if(target_check_error(target))
-		return -1;
+		return -3;
 
 	/* Execute the stub */
 	target_halt_resume(target, 0);
@@ -269,7 +278,7 @@ static int stm32f4_flash_write(struct target_s *target, uint32_t dest,
 	/* Check for error */
 	sr = adiv5_ap_mem_read(ap, FLASH_SR);
 	if(sr & SR_ERROR_MASK)
-		return -1;
+		return -4;
 
 	return 0;
 }

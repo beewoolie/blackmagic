@@ -1,0 +1,3 @@
+#!/bin/sh
+
+make CROSS_COMPILE=/opt/gcc-arm-none-eabi-4_7-2013q2/bin/arm-none-eabi- PREFIX=/opt/gcc-arm-none-eabi-4_7-2013q2/bin/arm-none-eabi $*

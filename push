@@ -1,0 +1,2 @@
+#!/bin/sh
+scripts/stm32_mem.py src/blackmagic.bin
