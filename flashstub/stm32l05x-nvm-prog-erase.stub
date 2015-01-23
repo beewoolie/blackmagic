@@ -38,12 +38,12 @@
   [0x22/2] = 0x089b, //   22:	089b      	lsrs	r3, r3, #2
   [0x24/2] = 0x009b, //   24:	009b      	lsls	r3, r3, #2
   [0x26/2] = 0x1acb, //   26:	1acb      	subs	r3, r1, r3
-// #define Nvm  (*reinterpret_cast<STM32::NVM*>(STM32L0_NVM_PHYS))
-// #define Info (*reinterpret_cast<stm32l0_nvm_stub_info*>(STM32L0_STUB_INFO_PHYS))
+// #define Info (*reinterpret_cast<stm32lx_nvm_stub_info*>(STM32Lx_STUB_INFO_PHYS))
+// 
 // 
 // namespace {
 //   inline __attribute((always_inline)) bool unlock () {
-//     Nvm.pecr    = STM32L0_NVM_PECR_PELOCK; // Lock to guarantee unlock
+//     Nvm.pecr      = STM32Lx_NVM_PECR_PELOCK; // Lock to guarantee unlock
   [0x28/2] = 0x2101, //   28:	2101      	movs	r1, #1
   [0x2a/2] = 0x6013, //   2a:	6013      	str	r3, [r2, #0]
   [0x2c/2] = 0x4b15, //   2c:	4b15      	ldr	r3, [pc, #84]	; (84 <stm32l05x_nvm_prog_erase+0x84>)
@@ -55,19 +55,19 @@
 //   Info.size        += remainder;
   [0x2e/2] = 0x6050, //   2e:	6050      	str	r0, [r2, #4]
   [0x30/2] = 0x6059, //   30:	6059      	str	r1, [r3, #4]
-//     Nvm.pkeyr   = STM32::NVM::PKEY1;
+//     Nvm.pkeyr     = STM32::NVM::PKEY1;
   [0x32/2] = 0x4915, //   32:	4915      	ldr	r1, [pc, #84]	; (88 <stm32l05x_nvm_prog_erase+0x88>)
   [0x34/2] = 0x60d9, //   34:	60d9      	str	r1, [r3, #12]
-//     Nvm.pkeyr   = STM32::NVM::PKEY2;
+//     Nvm.pkeyr     = STM32::NVM::PKEY2;
   [0x36/2] = 0x4915, //   36:	4915      	ldr	r1, [pc, #84]	; (8c <stm32l05x_nvm_prog_erase+0x8c>)
   [0x38/2] = 0x60d9, //   38:	60d9      	str	r1, [r3, #12]
-//     Nvm.prgkeyr = STM32::NVM::PRGKEY1;
+//     Nvm.prgkeyr   = STM32::NVM::PRGKEY1;
   [0x3a/2] = 0x4915, //   3a:	4915      	ldr	r1, [pc, #84]	; (90 <stm32l05x_nvm_prog_erase+0x90>)
   [0x3c/2] = 0x6119, //   3c:	6119      	str	r1, [r3, #16]
-//     Nvm.prgkeyr = STM32::NVM::PRGKEY2;
+//     Nvm.prgkeyr   = STM32::NVM::PRGKEY2;
   [0x3e/2] = 0x4915, //   3e:	4915      	ldr	r1, [pc, #84]	; (94 <stm32l05x_nvm_prog_erase+0x94>)
   [0x40/2] = 0x6119, //   40:	6119      	str	r1, [r3, #16]
-//     return !(Nvm.pecr & STM32L0_NVM_PECR_PRGLOCK);
+//     return !(Nvm.pecr & STM32Lx_NVM_PECR_PRGLOCK);
   [0x42/2] = 0x6858, //   42:	6858      	ldr	r0, [r3, #4]
   [0x44/2] = 0x1c11, //   44:	1c11      	adds	r1, r2, #0
 //   Info.destination -= remainder/sizeof (*Info.destination);
@@ -77,7 +77,7 @@
   [0x48/2] = 0xd502, //   48:	d502      	bpl.n	50 <stm32l05x_nvm_prog_erase+0x50>
 //   }
 //   inline __attribute((always_inline)) void lock () {
-//     Nvm.pecr = STM32L0_NVM_PECR_PELOCK; }
+//     Nvm.pecr      = STM32Lx_NVM_PECR_PELOCK; }
   [0x4a/2] = 0x2201, //   4a:	2201      	movs	r2, #1
   [0x4c/2] = 0x605a, //   4c:	605a      	str	r2, [r3, #4]
 //     Info.size -= Info.page_size;
@@ -92,16 +92,16 @@
 //     goto quit;
 // 
 //   // Enable erasing
-//   Nvm.pecr = STM32L0_NVM_PECR_PROG | STM32L0_NVM_PECR_ERASE;
+//   Nvm.pecr = STM32Lx_NVM_PECR_PROG | STM32Lx_NVM_PECR_ERASE;
   [0x50/2] = 0x2282, //   50:	2282      	movs	r2, #130	; 0x82
   [0x52/2] = 0x0092, //   52:	0092      	lsls	r2, r2, #2
   [0x54/2] = 0x605a, //   54:	605a      	str	r2, [r3, #4]
-//   if ((Nvm.pecr & (STM32L0_NVM_PECR_PROG | STM32L0_NVM_PECR_ERASE))
+//   if ((Nvm.pecr & (STM32Lx_NVM_PECR_PROG | STM32Lx_NVM_PECR_ERASE))
   [0x56/2] = 0x6858, //   56:	6858      	ldr	r0, [r3, #4]
   [0x58/2] = 0x4010, //   58:	4010      	ands	r0, r2
   [0x5a/2] = 0x4290, //   5a:	4290      	cmp	r0, r2
   [0x5c/2] = 0xd1f5, //   5c:	d1f5      	bne.n	4a <stm32l05x_nvm_prog_erase+0x4a>
-//       != (STM32L0_NVM_PECR_PROG | STM32L0_NVM_PECR_ERASE))
+//       != (STM32Lx_NVM_PECR_PROG | STM32Lx_NVM_PECR_ERASE))
 //     goto quit;
 // 
 //   while (Info.size > 0) {
@@ -115,8 +115,8 @@
 // 
 //     Info.destination += Info.page_size/sizeof (*Info.destination);
   [0x6a/2] = 0x6815, //   6a:	6815      	ldr	r5, [r2, #0]
-//   if ((Nvm.pecr & (STM32L0_NVM_PECR_PROG | STM32L0_NVM_PECR_ERASE))
-//       != (STM32L0_NVM_PECR_PROG | STM32L0_NVM_PECR_ERASE))
+//   if ((Nvm.pecr & (STM32Lx_NVM_PECR_PROG | STM32Lx_NVM_PECR_ERASE))
+//       != (STM32Lx_NVM_PECR_PROG | STM32Lx_NVM_PECR_ERASE))
 //     goto quit;
 // 
 //   while (Info.size > 0) {

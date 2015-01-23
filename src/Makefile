@@ -6,7 +6,8 @@ BUILDDATE := `date +"%Y%m%d"`
 
 CFLAGS += -Wall -Wextra -Wno-pointer-sign -Wno-char-subscripts\
 	-Wno-sign-compare \
-	-O2 -std=gnu99 -g3 -DBUILDDATE=\"$(BUILDDATE)\"\
+	-O2 \
+	-std=gnu99 -g3 -DBUILDDATE=\"$(BUILDDATE)\"\
 	-I. -Iinclude -I$(PLATFORM_DIR) \
 	-DVERSION_SUFFIX=\"`../scripts/setlocalversion`\" -MD
 

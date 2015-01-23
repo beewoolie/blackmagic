@@ -36,11 +36,13 @@
    that save the link pointer.  IOW, the inline functions should be be
    inlined.
 
+   *** FIXME: clear errors before starting.
+
 */
 
 #include <stdint.h>
 #include <string.h>
-#include "../src/include/stm32l0-nvm.h"
+#include "../src/include/stm32lx-nvm.h"
 
 /* Write a block of bytes to flash.  The called is responsible for
    making sure that the address are aligned and that the count is an
@@ -65,7 +67,7 @@ extern "C" void __attribute((naked)) stm32l05x_nvm_prog_write () {
     if (Info.size < Info.page_size/2
         || (reinterpret_cast<uint32_t> (Info.destination)
             & (Info.page_size/2 - 1))) {
-      Nvm.pecr = STM32L0_NVM_PECR_PROG; // Word programming
+      Nvm.pecr = STM32Lx_NVM_PECR_PROG; // Word programming
       size_t c = Info.page_size/2
         - (reinterpret_cast<uint32_t> (Info.destination)
            & (Info.page_size/2 - 1));
@@ -76,13 +78,13 @@ extern "C" void __attribute((naked)) stm32l05x_nvm_prog_write () {
       while (c--) {
         uint32_t v = *Info.source++;
         *Info.destination++ = v;
-        if (Nvm.sr & STM32L0_NVM_SR_ERR_M)
+        if (Nvm.sr & STM32Lx_NVM_SR_ERR_M)
           goto quit;
       }
     }
     // Or we are writing a half-page
     else {
-      Nvm.pecr = STM32L0_NVM_PECR_PROG | STM32L0_NVM_PECR_FPRG; // Half-page prg
+      Nvm.pecr = STM32Lx_NVM_PECR_PROG | STM32Lx_NVM_PECR_FPRG; // Half-page prg
       size_t c = Info.page_size/2;
       Info.size -= c;
       c /= 4;
@@ -90,7 +92,7 @@ extern "C" void __attribute((naked)) stm32l05x_nvm_prog_write () {
         uint32_t v = *Info.source++;
         *Info.destination++ = v;
       }
-      if (Nvm.sr & STM32L0_NVM_SR_ERR_M)
+      if (Nvm.sr & STM32Lx_NVM_SR_ERR_M)
         goto quit;
     }
   }

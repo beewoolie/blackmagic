@@ -35,11 +35,13 @@
    that save the link pointer.  IOW, the inline functions should be be
    inlined.
 
+   *** FIXME: clear errors before starting.
+
 */
 
 #include <stdint.h>
 #include <string.h>
-#include "../src/include/stm32l0-nvm.h"
+#include "../src/include/stm32lx-nvm.h"
 
 /* Erase a region of flash.  In the event that the erase is misaligned
    with respect to pages, it will erase the pages that contain the
@@ -65,9 +67,9 @@ extern "C" void __attribute((naked)) stm32l05x_nvm_prog_erase () {
     goto quit;
 
   // Enable erasing
-  Nvm.pecr = STM32L0_NVM_PECR_PROG | STM32L0_NVM_PECR_ERASE;
-  if ((Nvm.pecr & (STM32L0_NVM_PECR_PROG | STM32L0_NVM_PECR_ERASE))
-      != (STM32L0_NVM_PECR_PROG | STM32L0_NVM_PECR_ERASE))
+  Nvm.pecr = STM32Lx_NVM_PECR_PROG | STM32Lx_NVM_PECR_ERASE;
+  if ((Nvm.pecr & (STM32Lx_NVM_PECR_PROG | STM32Lx_NVM_PECR_ERASE))
+      != (STM32Lx_NVM_PECR_PROG | STM32Lx_NVM_PECR_ERASE))
     goto quit;
 
   while (Info.size > 0) {

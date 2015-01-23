@@ -14,29 +14,29 @@
   [0x0/2] = 0xe008, //    0:	e008      	b.n	14 <stm32l05x_nvm_prog_write+0x14>
   [0x2/2] = 0x46c0, //    2:	46c0      	nop			; (mov r8, r8)
 // 	...
-// #define Nvm  (*reinterpret_cast<STM32::NVM*>(STM32L0_NVM_PHYS))
-// #define Info (*reinterpret_cast<stm32l0_nvm_stub_info*>(STM32L0_STUB_INFO_PHYS))
+// #define Info (*reinterpret_cast<stm32lx_nvm_stub_info*>(STM32Lx_STUB_INFO_PHYS))
+// 
 // 
 // namespace {
 //   inline __attribute((always_inline)) bool unlock () {
-//     Nvm.pecr    = STM32L0_NVM_PECR_PELOCK; // Lock to guarantee unlock
+//     Nvm.pecr      = STM32Lx_NVM_PECR_PELOCK; // Lock to guarantee unlock
   [0x14/2] = 0x2201, //   14:	2201      	movs	r2, #1
   [0x16/2] = 0x4b28, //   16:	4b28      	ldr	r3, [pc, #160]	; (b8 <stm32l05x_nvm_prog_write+0xb8>)
   [0x18/2] = 0x605a, //   18:	605a      	str	r2, [r3, #4]
-//     Nvm.pkeyr   = STM32::NVM::PKEY1;
+//     Nvm.pkeyr     = STM32::NVM::PKEY1;
   [0x1a/2] = 0x4a28, //   1a:	4a28      	ldr	r2, [pc, #160]	; (bc <stm32l05x_nvm_prog_write+0xbc>)
   [0x1c/2] = 0x1c18, //   1c:	1c18      	adds	r0, r3, #0
   [0x1e/2] = 0x60da, //   1e:	60da      	str	r2, [r3, #12]
-//     Nvm.pkeyr   = STM32::NVM::PKEY2;
+//     Nvm.pkeyr     = STM32::NVM::PKEY2;
   [0x20/2] = 0x4a27, //   20:	4a27      	ldr	r2, [pc, #156]	; (c0 <stm32l05x_nvm_prog_write+0xc0>)
   [0x22/2] = 0x60da, //   22:	60da      	str	r2, [r3, #12]
-//     Nvm.prgkeyr = STM32::NVM::PRGKEY1;
+//     Nvm.prgkeyr   = STM32::NVM::PRGKEY1;
   [0x24/2] = 0x4a27, //   24:	4a27      	ldr	r2, [pc, #156]	; (c4 <stm32l05x_nvm_prog_write+0xc4>)
   [0x26/2] = 0x611a, //   26:	611a      	str	r2, [r3, #16]
-//     Nvm.prgkeyr = STM32::NVM::PRGKEY2;
+//     Nvm.prgkeyr   = STM32::NVM::PRGKEY2;
   [0x28/2] = 0x4a27, //   28:	4a27      	ldr	r2, [pc, #156]	; (c8 <stm32l05x_nvm_prog_write+0xc8>)
   [0x2a/2] = 0x611a, //   2a:	611a      	str	r2, [r3, #16]
-//     return !(Nvm.pecr & STM32L0_NVM_PECR_PRGLOCK);
+//     return !(Nvm.pecr & STM32Lx_NVM_PECR_PRGLOCK);
   [0x2c/2] = 0x685a, //   2c:	685a      	ldr	r2, [r3, #4]
 // 
 //   if (!unlock ())
@@ -44,7 +44,7 @@
   [0x30/2] = 0xd514, //   30:	d514      	bpl.n	5c <stm32l05x_nvm_prog_write+0x5c>
 //   }
 //   inline __attribute((always_inline)) void lock () {
-//     Nvm.pecr = STM32L0_NVM_PECR_PELOCK; }
+//     Nvm.pecr      = STM32Lx_NVM_PECR_PELOCK; }
   [0x32/2] = 0x2301, //   32:	2301      	movs	r3, #1
   [0x34/2] = 0x6043, //   34:	6043      	str	r3, [r0, #4]
 //     }
@@ -67,7 +67,7 @@
   [0x40/2] = 0xd212, //   40:	d212      	bcs.n	68 <stm32l05x_nvm_prog_write+0x68>
 //         || (reinterpret_cast<uint32_t> (Info.destination)
 //             & (Info.page_size/2 - 1))) {
-//       Nvm.pecr = STM32L0_NVM_PECR_PROG; // Word programming
+//       Nvm.pecr = STM32Lx_NVM_PECR_PROG; // Word programming
   [0x42/2] = 0x2508, //   42:	2508      	movs	r5, #8
   [0x44/2] = 0x6045, //   44:	6045      	str	r5, [r0, #4]
 //       size_t c = Info.page_size/2
@@ -125,7 +125,7 @@
   [0x7a/2] = 0x1d15, //   7a:	1d15      	adds	r5, r2, #4
   [0x7c/2] = 0x6025, //   7c:	6025      	str	r5, [r4, #0]
   [0x7e/2] = 0x6011, //   7e:	6011      	str	r1, [r2, #0]
-//         if (Nvm.sr & STM32L0_NVM_SR_ERR_M)
+//         if (Nvm.sr & STM32Lx_NVM_SR_ERR_M)
   [0x80/2] = 0x6981, //   80:	6981      	ldr	r1, [r0, #24]
   [0x82/2] = 0x4a13, //   82:	4a13      	ldr	r2, [pc, #76]	; (d0 <stm32l05x_nvm_prog_write+0xd0>)
   [0x84/2] = 0x4211, //   84:	4211      	tst	r1, r2
@@ -136,7 +136,7 @@
 //     }
 //     // Or we are writing a half-page
 //     else {
-//       Nvm.pecr = STM32L0_NVM_PECR_PROG | STM32L0_NVM_PECR_FPRG; // Half-page prg
+//       Nvm.pecr = STM32Lx_NVM_PECR_PROG | STM32Lx_NVM_PECR_FPRG; // Half-page prg
   [0x8a/2] = 0x2381, //   8a:	2381      	movs	r3, #129	; 0x81
   [0x8c/2] = 0x00db, //   8c:	00db      	lsls	r3, r3, #3
   [0x8e/2] = 0x6043, //   8e:	6043      	str	r3, [r0, #4]
@@ -161,7 +161,7 @@
   [0xa8/2] = 0x6011, //   a8:	6011      	str	r1, [r2, #0]
   [0xaa/2] = 0xe7f4, //   aa:	e7f4      	b.n	96 <stm32l05x_nvm_prog_write+0x96>
 //       }
-//       if (Nvm.sr & STM32L0_NVM_SR_ERR_M)
+//       if (Nvm.sr & STM32Lx_NVM_SR_ERR_M)
   [0xac/2] = 0x6982, //   ac:	6982      	ldr	r2, [r0, #24]
   [0xae/2] = 0x4b08, //   ae:	4b08      	ldr	r3, [pc, #32]	; (d0 <stm32l05x_nvm_prog_write+0xd0>)
   [0xb0/2] = 0x421a, //   b0:	421a      	tst	r2, r3

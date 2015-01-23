@@ -21,14 +21,19 @@
    -----------
 
    This is an implementation of the target-specific functions for the
-   STM32L0x[1] family of ST Microelectronics MCUs, Cortex M0+ SOCs.  The
-   NVM interface is substantially similar to the STM32L1x parts.  This
-   module is written to better generalize the NVM interface and to
-   provide more features.
+   STM32L0x[1] and STM32L1x[2] families of ST Microelectronics MCUs,
+   Cortex M0+ SOCs.  The NVM interface is substantially similar to the
+   STM32L1x parts.  This module is written to better generalize the
+   NVM interface and to provide more features.
 
    [1] ST Microelectronics Document RM0377 (DocID025942), "Reference
        manual for Ultra-low-power STM32L0x1 advanced ARM-based 32-bit
        MCUs," April 2014.
+
+   [2] ST Microelectronics Document RM0038 (DocID15965, "..."Reference
+       manual for STM32L100xx, STM32L151xx, STM32L152xx and STM32L162xx
+       advanced ARM®-based 32-bit MCUs, " July 2014
+
 
    NOTES
    =====
@@ -49,9 +54,6 @@
      accordingly. The user can override stubs as well with a command
      in case the detection feature fails.
 
-   o Can we add support for EEPROM (data) flash operations?  At a
-     minimum, it would be helpful to provide an erase command.
-
    o Erase would be more efficient if we checked for non-blank-ness
      before initiating an erase.  This would have to be done in a stub
      for efficiency.
@@ -62,6 +64,22 @@
      again.  The command fails because we lose contact with the target
      when we perform the option byte reload.  For the time being, the
      command is disabled.
+
+   o Errors.  We probably should clear SR errors immediately after
+     detecting them.  If we don't then we always must wait for the NVM
+     module to complete the last operation before we can start another.
+
+   o There are minor inconsistencies between the stm32l0 and the
+     stm32l1 in when handling NVM operations.
+
+     o When we erase or write individual words (not half-pages) on the
+       stm32l0, we set the PROG bit.  On the stm32l1 the PROG bit is
+       only set when erasing.  This  is not documented in the register
+       summaries, but in the functional quick reference.
+
+     o On the STM32L1xx, PECR can only be changed when the NVM
+       hardware is idle.  The STM32L0xx allows the PECR to be updated
+       while an operation is in progress.
 
   0x1ff80000: 0x00aa 0xff55 OK
   0x1ff80004: 0x8070 0x7f8f OK
@@ -79,7 +97,20 @@ p *(int*)0x40022004 = 0x10
 x/4wx 0x40022000
 p *(int*)0x1ff80000 = 0xff5500aa
 
+  l1 program
+p *(int*)0x40023c04 = 1
+p *(int*)0x40023c0c = 0x89abcdef
+p *(int*)0x40023c0c = 0x02030405
+p *(int*)0x40023c10 = 0x8c9daebf
+p *(int*)0x40023c10 = 0x13141516
+
+
+p *(int*)0x40023c14 = 0xfbead9c8
+p *(int*)0x40023c14 = 0x24252627
+
 */
+
+#define CONFIG_STM32L1          /* Include support for STM32L1 */
 
 #include <stdlib.h>
 #include <string.h>
@@ -90,52 +121,60 @@ p *(int*)0x1ff80000 = 0xff5500aa
 #include "target.h"
 #include "command.h"
 
-#include "stm32l0-nvm.h"
+#include "stm32lx-nvm.h"
 
-static int inhibit_l0_stubs;
+static int inhibit_stubs;
 
-static int stm32l0_nvm_erase (struct target_s* target,
+static int stm32lx_nvm_erase (struct target_s* target,
                               uint32_t addr, int len);
-static int stm32l0_nvm_prog_erase (struct target_s* target,
-                                   uint32_t addr, int len);
-static int stm32l0_nvm_prog_erase_stubbed (struct target_s* target,
-                                           uint32_t addr, int len);
-static int stm32l0_nvm_write (struct target_s* target,
+static int stm32lx_nvm_write (struct target_s* target,
                               uint32_t destination,
                               const uint8_t* source,
                               int size);
-static int stm32l0_nvm_prog_write (struct target_s* target,
+
+static int stm32lx_nvm_prog_erase (struct target_s* target,
+                                   uint32_t addr, int len);
+static int stm32lx_nvm_prog_write (struct target_s* target,
                                    uint32_t destination,
                                    const uint8_t* source,
                                    int size);
-static int stm32l0_nvm_prog_write_stubbed (struct target_s* target,
+
+static int stm32lx_nvm_prog_erase_stubbed (struct target_s* target,
+                                           uint32_t addr, int len);
+static int stm32lx_nvm_prog_write_stubbed (struct target_s* target,
                                            uint32_t destination,
                                            const uint8_t* source,
                                            int size);
-static int stm32l0_nvm_data_erase (struct target_s* target,
+
+static int stm32lx_nvm_data_erase (struct target_s* target,
                                    uint32_t addr, int len);
-static int stm32l0_nvm_data_write (struct target_s* target,
+static int stm32lx_nvm_data_write (struct target_s* target,
                                    uint32_t destination,
                                    const uint8_t* source,
                                    int size);
 
 //static bool stm32l0_cmd_erase_mass (target* t, int argc, char** argv);
-static bool stm32l0_cmd_option     (target* t, int argc, char** argv);
-static bool stm32l0_cmd_eeprom     (target* t, int argc, char** argv);
+static bool stm32lx_cmd_option     (target* t, int argc, char** argv);
+static bool stm32lx_cmd_eeprom     (target* t, int argc, char** argv);
 //static bool stm32l0_cmd_reset      (target* t, int argc, char** argv);
-static bool stm32l0_cmd_stubs      (target* t, int argc, char** argv);
+static bool stm32lx_cmd_stubs      (target* t, int argc, char** argv);
 
-static const struct command_s stm32l0_cmd_list[] = {
-  { "stubs",		(cmd_handler) stm32l0_cmd_stubs,
+static const struct command_s stm32lx_cmd_list[] = {
+  { "stubs",		(cmd_handler) stm32lx_cmd_stubs,
     "Enable/disable NVM operation stubs" },
 //  { "erase_mass",	(cmd_handler) stm32l0_cmd_erase_mass,
 //    "Erase NVM flash and data" },
 //  { "reset",		(cmd_handler) stm32l0_cmd_reset, "Reset target" },
-  { "option",		(cmd_handler) stm32l0_cmd_option,
+  { "option",		(cmd_handler) stm32lx_cmd_option,
     "Manipulate option bytes"},
-  { "eeprom",		(cmd_handler) stm32l0_cmd_eeprom,
+  { "eeprom",		(cmd_handler) stm32lx_cmd_eeprom,
     "Manipulate EEPROM (NVM data) memory"},
   { 0 },
+};
+
+enum {
+  STM32L0_DBGMCU_IDCODE_PHYS = 0x40015800,
+  STM32L1_DBGMCU_IDCODE_PHYS = 0xe0042000,
 };
 
 static const char stm32l0_driver_str[] = "STM32L0xx";
@@ -145,23 +184,38 @@ static const char stm32l0_xml_memory_map[] = "<?xml version=\"1.0\"?>"
    "             PUBLIC \"+//IDN gnu.org//DTD GDB Memory Map V1.0//EN\""
    "                    \"http://sourceware.org/gdb/gdb-memory-map.dtd\">"*/
 	"<memory-map>"
-  /* Generous allocation memory allocation for program flash.  At the
-     time this driver was written there were no L0xx parts with more
-     than 64KiB of program flash. */
-	"  <memory type=\"flash\" start=\"0x08000000\" length=\"0x80000\">"
-	"    <property name=\"blocksize\">0x100</property>"
+  /* Program flash; ranges up to 64KiB (0x10000). */
+	"  <memory type=\"flash\" start=\"0x08000000\" length=\"0x10000\">"
+	"    <property name=\"blocksize\">0x80</property>"
 	"  </memory>"
-  /* Data (EEPROM) allocation of just 2K because that seems to be the
-     current state of the components. */
+  /* Data (EEPROM) NVRAM; ranges up to 2KiB (0x800). */
 	"  <memory type=\"flash\" start=\"0x08080000\" length=\"0x800\">"
 	"    <property name=\"blocksize\">0x4</property>"
 	"  </memory>"
-  /* Like the program flash allocation, this is a generously sized
-     section.  The shipping parts have no more than 8KiB of SRAM. */
-	"  <memory type=\"ram\" start=\"0x20000000\" length=\"0x5000\"/>"
+  /* SRAM; ranges up to 8KiB (0x2000). */
+	"  <memory type=\"ram\" start=\"0x20000000\" length=\"0x2000\"/>"
 	"</memory-map>";
 
-#define STM32L0_DBGMCU_IDCODE_PHYS	0x40015800
+#if defined (CONFIG_STM32L1)
+static const char stm32l1_driver_str[] = "STM32L1xx+";
+
+static const char stm32l1_xml_memory_map[] = "<?xml version=\"1.0\"?>"
+/* "<!DOCTYPE memory-map "
+   "             PUBLIC \"+//IDN gnu.org//DTD GDB Memory Map V1.0//EN\""
+   "                    \"http://sourceware.org/gdb/gdb-memory-map.dtd\">"*/
+	"<memory-map>"
+  /* Program flash; ranges from 32KiB to 512KiB (0x80000). */
+	"  <memory type=\"flash\" start=\"0x08000000\" length=\"0x80000\">"
+	"    <property name=\"blocksize\">0x100</property>"
+	"  </memory>"
+  /* Data (EEPROM) NVRAM; ranges from 2K to 16KiB (0x4000). */
+	"  <memory type=\"flash\" start=\"0x08080000\" length=\"0x4000\">"
+	"    <property name=\"blocksize\">0x4</property>"
+	"  </memory>"
+  /* SRAM; ranges from 4KiB to 80KiB (0x14000). */
+	"  <memory type=\"ram\" start=\"0x20000000\" length=\"0x14000\"/>"
+	"</memory-map>";
+#endif
 
 static const uint16_t stm32l0_nvm_prog_write_stub [] = {
 #include "../flashstub/stm32l05x-nvm-prog-write.stub"
@@ -171,154 +225,165 @@ static const uint16_t stm32l0_nvm_prog_erase_stub [] = {
 #include "../flashstub/stm32l05x-nvm-prog-erase.stub"
 };
 
+static uint32_t stm32lx_nvm_prog_page_size (struct target_s* target)
+{
+  switch (target->idcode) {
+  case 0x417:                   /* STM32L0xx */
+    return STM32L0_NVM_PROG_PAGE_SIZE;
+  default:                      /* STM32L1xx */
+    return STM32L1_NVM_PROG_PAGE_SIZE;
+  }
+}
+
+static bool stm32lx_is_stm32l1 (struct target_s* target)
+{
+  switch (target->idcode) {
+  case 0x417:                   /* STM32L0xx */
+    return false;
+  default:                      /* STM32L1xx */
+    return true;
+  }
+}
+
+static uint32_t stm32lx_nvm_eeprom_size (struct target_s* target)
+{
+  switch (target->idcode) {
+  case 0x417:                   /* STM32L0xx */
+    return STM32L0_NVM_EEPROM_SIZE;
+  default:                      /* STM32L1xx */
+    return STM32L1_NVM_EEPROM_SIZE;
+  }
+}
+
+static uint32_t stm32lx_nvm_phys (struct target_s* target)
+{
+  switch (target->idcode) {
+  case 0x417:                   /* STM32L0xx */
+    return STM32L0_NVM_PHYS;
+  default:                      /* STM32L1xx */
+    return STM32L1_NVM_PHYS;
+  }
+}
+
+static uint32_t stm32lx_nvm_data_page_size (struct target_s* target)
+{
+  switch (target->idcode) {
+  case 0x417:                   /* STM32L0xx */
+    return STM32L0_NVM_DATA_PAGE_SIZE;
+  default:                      /* STM32L1xx */
+    return STM32L1_NVM_DATA_PAGE_SIZE;
+  }
+}
+
+static uint32_t stm32lx_nvm_option_size (struct target_s* target)
+{
+  switch (target->idcode) {
+  case 0x417:                   /* STM32L0xx */
+    return STM32L0_NVM_OPT_SIZE;
+  default:                      /* STM32L1xx */
+    return STM32L1_NVM_OPT_SIZE;
+  }
+}
+
 /** Query MCU memory for an indication as to whether or not the
-    currently attached target is served by this module. */
+    currently attached target is served by this module.  We detect the
+    STM32L0xx parts as well as the STM32L1xx's. */
 bool stm32l0_probe (struct target_s* target)
 {
-  uint32_t idcode = adiv5_ap_mem_read (adiv5_target_ap (target),
-                                       STM32L0_DBGMCU_IDCODE_PHYS);
-  switch (idcode & 0xfff) {
+  uint32_t idcode;
+
+#if defined (CONFIG_STM32L1)
+
+  idcode = adiv5_ap_mem_read (adiv5_target_ap (target),
+                              STM32L1_DBGMCU_IDCODE_PHYS) & 0xfff;
+  switch (idcode) {
+  case 0x416:                   /* CAT. 1 device */
+  case 0x429:                   /* CAT. 2 device */
+  case 0x427:                   /* CAT. 3 device */
+  case 0x436:                   /* CAT. 4 device */
+  case 0x437:                   /* CAT. 5 device  */
+    target->idcode      = idcode;
+    target->driver      = stm32l1_driver_str;
+    target->xml_mem_map = stm32l1_xml_memory_map;
+    target->flash_erase = stm32lx_nvm_erase;
+    target->flash_write = stm32lx_nvm_write;
+    target_add_commands (target, stm32lx_cmd_list, "STM32L1x");
+    return true;
+  }
+#endif
+
+  idcode = adiv5_ap_mem_read (adiv5_target_ap (target),
+                              STM32L0_DBGMCU_IDCODE_PHYS) & 0xfff;
+  switch (idcode) {
   default:
-    return false;
+    break;
 
   case 0x417:                   /* STM32L0x[123] & probably others */
+    target->idcode      = idcode;
     target->driver	= stm32l0_driver_str;
     target->xml_mem_map = stm32l0_xml_memory_map;
-    target->flash_erase = stm32l0_nvm_erase;
-    target->flash_write = stm32l0_nvm_write;
-    target_add_commands (target, stm32l0_cmd_list, "STM32L0x");
-    break;
+    target->flash_erase = stm32lx_nvm_erase;
+    target->flash_write = stm32lx_nvm_write;
+    target_add_commands (target, stm32lx_cmd_list, "STM32L0x");
+    return true;
   }
 
-  return true;
+  return false;
 }
 
 /** Lock the NVM control registers preventing writes or erases. */
-static void stm32l0_nvm_lock (ADIv5_AP_t* ap)
+static void stm32lx_nvm_lock (ADIv5_AP_t* ap, uint32_t nvm)
 {
-  adiv5_ap_mem_write (ap, STM32L0_NVM_PECR, STM32L0_NVM_PECR_PELOCK);
+  adiv5_ap_mem_write (ap, STM32Lx_NVM_PECR(nvm), STM32Lx_NVM_PECR_PELOCK);
 }
 
 /** Unlock the NVM control registers for modifying program or
     data flash.  Returns true if the unlock succeeds. */
-static bool stm32l0_nvm_prog_data_unlock (ADIv5_AP_t* ap)
+static bool stm32lx_nvm_prog_data_unlock (ADIv5_AP_t* ap, uint32_t nvm)
 {
   /* Always lock first because that's the only way to know that the
      unlock can succeed. */
-  adiv5_ap_mem_write (ap, STM32L0_NVM_PECR,    STM32L0_NVM_PECR_PELOCK);
-  adiv5_ap_mem_write (ap, STM32L0_NVM_PKEYR,   STM32L0_NVM_PKEY1);
-  adiv5_ap_mem_write (ap, STM32L0_NVM_PKEYR,   STM32L0_NVM_PKEY2);
-  adiv5_ap_mem_write (ap, STM32L0_NVM_PRGKEYR, STM32L0_NVM_PRGKEY1);
-  adiv5_ap_mem_write (ap, STM32L0_NVM_PRGKEYR, STM32L0_NVM_PRGKEY2);
+  adiv5_ap_mem_write (ap, STM32Lx_NVM_PECR(nvm),    STM32Lx_NVM_PECR_PELOCK);
+  adiv5_ap_mem_write (ap, STM32Lx_NVM_PEKEYR(nvm),  STM32Lx_NVM_PEKEY1);
+  adiv5_ap_mem_write (ap, STM32Lx_NVM_PEKEYR(nvm),  STM32Lx_NVM_PEKEY2);
+  adiv5_ap_mem_write (ap, STM32Lx_NVM_PRGKEYR(nvm), STM32Lx_NVM_PRGKEY1);
+  adiv5_ap_mem_write (ap, STM32Lx_NVM_PRGKEYR(nvm), STM32Lx_NVM_PRGKEY2);
 
-  return !(adiv5_ap_mem_read (ap, STM32L0_NVM_PECR)& STM32L0_NVM_PECR_PRGLOCK);
+  return !(adiv5_ap_mem_read (ap, STM32Lx_NVM_PECR(nvm))
+           & STM32Lx_NVM_PECR_PRGLOCK);
 }
+
 
 /** Unlock the NVM control registers for modifying option bytes.
     Returns true if the unlock succeeds. */
-static bool stm32l0_nvm_opt_unlock (ADIv5_AP_t* ap)
+static bool stm32lx_nvm_opt_unlock (ADIv5_AP_t* ap, uint32_t nvm)
 {
   /* Always lock first because that's the only way to know that the
      unlock can succeed. */
-  adiv5_ap_mem_write (ap, STM32L0_NVM_PECR,    STM32L0_NVM_PECR_PELOCK);
-  adiv5_ap_mem_write (ap, STM32L0_NVM_PKEYR,   STM32L0_NVM_PKEY1);
-  adiv5_ap_mem_write (ap, STM32L0_NVM_PKEYR,   STM32L0_NVM_PKEY2);
-  adiv5_ap_mem_write (ap, STM32L0_NVM_OPTKEYR, STM32L0_NVM_OPTKEY1);
-  adiv5_ap_mem_write (ap, STM32L0_NVM_OPTKEYR, STM32L0_NVM_OPTKEY2);
+  adiv5_ap_mem_write (ap, STM32Lx_NVM_PECR(nvm),    STM32Lx_NVM_PECR_PELOCK);
+  adiv5_ap_mem_write (ap, STM32Lx_NVM_PEKEYR(nvm),  STM32Lx_NVM_PEKEY1);
+  adiv5_ap_mem_write (ap, STM32Lx_NVM_PEKEYR(nvm),  STM32Lx_NVM_PEKEY2);
+  adiv5_ap_mem_write (ap, STM32Lx_NVM_OPTKEYR(nvm), STM32Lx_NVM_OPTKEY1);
+  adiv5_ap_mem_write (ap, STM32Lx_NVM_OPTKEYR(nvm), STM32Lx_NVM_OPTKEY2);
 
-  return !(adiv5_ap_mem_read (ap, STM32L0_NVM_PECR) & STM32L0_NVM_PECR_OPTLOCK);
+  return !(adiv5_ap_mem_read (ap, STM32Lx_NVM_PECR(nvm))
+           & STM32Lx_NVM_PECR_OPTLOCK);
 }
 
-/** Erase a region of NVM.  This is the lead function and it will
-    invoke an implementation, stubbed or not depending on the options
-    and the range of addresses. */
-static int stm32l0_nvm_erase (struct target_s* target, uint32_t addr, int size)
-{
-  if (addr >= STM32L0_NVM_EEPROM_PHYS)
-    return stm32l0_nvm_data_erase (target, addr, size);
-
-  /* Skip stub if the MCU is in a questionable state or if the user
-     asks us to avoid stubs. */
-  volatile uint32_t regs[20];
-  target_regs_read (target, &regs);
-  if (inhibit_l0_stubs || (regs[16] & 0xf))
-    return stm32l0_nvm_prog_erase (target, addr, size);
-
-  return stm32l0_nvm_prog_erase_stubbed (target, addr, size);
-}
-
-/** Erase a region of flash using operations through the debug
-    interface .  This is slower than the stubbed version (see
-    NOTES). The flash array is erased for all pages from addr to
-    addr+len inclusive. */
-static int stm32l0_nvm_prog_erase (struct target_s* target,
-                                   uint32_t addr, int len)
-{
-  ADIv5_AP_t* ap = adiv5_target_ap (target);
-
-  /* Word align */
-  len += (addr & 3);
-  addr &= ~3;
-
-  if (!stm32l0_nvm_prog_data_unlock (ap))
-    return -1;
-
-  /* Flash page erase instruction */
-  adiv5_ap_mem_write (ap, STM32L0_NVM_PECR,
-                      STM32L0_NVM_PECR_ERASE | STM32L0_NVM_PECR_PROG);
-
-  {
-    uint32_t pecr = adiv5_ap_mem_read (ap, STM32L0_NVM_PECR);
-    if ((pecr & (STM32L0_NVM_PECR_PROG | STM32L0_NVM_PECR_ERASE))
-        != (STM32L0_NVM_PECR_PROG | STM32L0_NVM_PECR_ERASE))
-      return -1;
-  }
-
-  while (len > 0) {
-    /* Write first word of page to 0 */
-    adiv5_ap_mem_write (ap, addr, 0);
-
-    len  -= STM32L0_NVM_PROG_PAGE_SIZE;
-    addr += STM32L0_NVM_PROG_PAGE_SIZE;
-  }
-
-  /* Disable further programming by locking PECR */
-  stm32l0_nvm_lock (ap);
-
-  /* Wait for completion or an error */
-  while (1) {
-    uint32_t sr = adiv5_ap_mem_read (ap, STM32L0_NVM_SR);
-    if (target_check_error (target))
-      return -1;
-    if (sr & STM32L0_NVM_SR_BSY)
-      continue;
-    if ((sr & STM32L0_NVM_SR_ERR_M) || !(sr & STM32L0_NVM_SR_EOP))
-      return -1;
-    break;
-  }
-
-  return 0;
-}
 
 /** Erase a region of flash using a stub function.  This only works
     when the MCU hasn't entered a fault state (see NOTES).  The flash
-    array is erased for all pages from addr to addr+len inclusive. */
-static int stm32l0_nvm_prog_erase_stubbed (struct target_s* target,
+    array is erased for all pages from addr to addr+len inclusive.
+    Only stm32l0xx is supported. */
+static int stm32lx_nvm_prog_erase_stubbed (struct target_s* target,
                                            uint32_t addr, int size)
 {
-  /* Skip stub if the MCU is in a questionable state or if the user
-     asks us to avoid stubs. */
-  volatile uint32_t regs[20];
-  target_regs_read (target, &regs);
-  if (inhibit_l0_stubs || (regs[16] & 0xf))
-    return stm32l0_nvm_prog_erase (target, addr, size);
+  struct stm32lx_nvm_stub_info info;
 
-  struct stm32l0_nvm_stub_info info;
-
-  info.page_size = STM32L0_NVM_PROG_PAGE_SIZE;
+  info.page_size = stm32lx_nvm_prog_page_size (target);
 
   /* Load the stub */
-  target_mem_write_words (target, STM32L0_STUB_PHYS,
+  target_mem_write_words (target, STM32Lx_STUB_PHYS,
                           (void*) &stm32l0_nvm_prog_erase_stub[0],
                           sizeof (stm32l0_nvm_prog_erase_stub));
 
@@ -327,170 +392,21 @@ static int stm32l0_nvm_prog_erase_stubbed (struct target_s* target,
   info.size        = size;
 
   /* Copy parameters */
-  target_mem_write_words (target, STM32L0_STUB_INFO_PHYS,
+  target_mem_write_words (target, STM32Lx_STUB_INFO_PHYS,
                           (void*) &info, sizeof (info));
 
   /* Execute stub */
-  target_pc_write (target, STM32L0_STUB_PHYS);
+  target_pc_write (target, STM32Lx_STUB_PHYS);
   if (target_check_error (target))
     return -1;
   target_halt_resume (target, 0);
   while (!target_halt_wait (target))
     ;
   {
-    ADIv5_AP_t* ap = adiv5_target_ap(target);
-    if (adiv5_ap_mem_read (ap, STM32L0_NVM_SR) & STM32L0_NVM_SR_ERR_M)
+    ADIv5_AP_t* ap     = adiv5_target_ap(target);
+    const uint32_t nvm = stm32lx_nvm_phys (target);
+    if (adiv5_ap_mem_read (ap, STM32Lx_NVM_SR(nvm)) & STM32Lx_NVM_SR_ERR_M)
       return -1;
-  }
-
-  return 0;
-}
-
-
-/** Erase a region of data flash using operations through the debug
-    interface .  The flash is erased for all pages from addr to
-    addr+len, inclusive, on a word boundary. */
-static int stm32l0_nvm_data_erase (struct target_s* target,
-                                   uint32_t addr, int len)
-{
-  ADIv5_AP_t* ap = adiv5_target_ap (target);
-
-  /* Word align */
-  len += (addr & 3);
-  addr &= ~3;
-
-  if (!stm32l0_nvm_prog_data_unlock (ap))
-    return -1;
-
-  /* Flash data erase instruction */
-  adiv5_ap_mem_write (ap, STM32L0_NVM_PECR,
-                      STM32L0_NVM_PECR_ERASE | STM32L0_NVM_PECR_DATA);
-
-  {
-    uint32_t pecr = adiv5_ap_mem_read (ap, STM32L0_NVM_PECR);
-    if ((pecr & (STM32L0_NVM_PECR_ERASE | STM32L0_NVM_PECR_DATA))
-        != (STM32L0_NVM_PECR_ERASE | STM32L0_NVM_PECR_DATA))
-      return -1;
-  }
-
-  while (len > 0) {
-    /* Write first word of page to 0 */
-    adiv5_ap_mem_write (ap, addr, 0);
-
-    len  -= STM32L0_NVM_DATA_PAGE_SIZE;
-    addr += STM32L0_NVM_DATA_PAGE_SIZE;
-  }
-
-  /* Disable further programming by locking PECR */
-  stm32l0_nvm_lock (ap);
-
-  /* Wait for completion or an error */
-  while (1) {
-    uint32_t sr = adiv5_ap_mem_read (ap, STM32L0_NVM_SR);
-    if (target_check_error (target))
-      return -1;
-    if (sr & STM32L0_NVM_SR_BSY)
-      continue;
-    if ((sr & STM32L0_NVM_SR_ERR_M) || !(sr & STM32L0_NVM_SR_EOP))
-      return -1;
-    break;
-  }
-
-  return 0;
-}
-
-
-/** Write to a region on NVM.  This is the lead function and it will
-    ibvoke an implementation, stubbed or not depending on the options
-    and the range of addresses. */
-static int stm32l0_nvm_write (struct target_s* target,
-                              uint32_t destination,
-                              const uint8_t* source,
-                              int size)
-{
-  if (destination >= STM32L0_NVM_EEPROM_PHYS)
-    return stm32l0_nvm_data_write (target, destination, source, size);
-
-  /* Skip stub if the MCU is in a questionable state or if the user
-     asks us to avoid stubs. */
-  volatile uint32_t regs[20];
-  target_regs_read (target, &regs);
-  if (inhibit_l0_stubs || (regs[16] & 0xf))
-    return stm32l0_nvm_prog_write (target, destination, source, size);
-
-  return stm32l0_nvm_prog_write_stubbed (target, destination, source, size);
-}
-
-
-/** Write to program flash using operations through the debug
-    interface.  This is slower than the stubbed write (see NOTES). */
-static int stm32l0_nvm_prog_write (struct target_s* target,
-                                   uint32_t destination,
-                                   const uint8_t* source_8,
-
-                                   int size)
-{
-  ADIv5_AP_t* ap = adiv5_target_ap (target);
-
-  /* We can only handle word aligned writes and even word-multiple
-     ranges.  The stm32l0 cannot perform anything smaller than a word
-     write due to the ECC bits. */
-  if ((destination & 3) || (size & 3))
-    return -1;
-
-  if (!stm32l0_nvm_prog_data_unlock (ap))
-    return -1;
-
-  const size_t page_size = STM32L0_NVM_PROG_PAGE_SIZE;
-  uint32_t* source = (uint32_t*) source_8;
-
-  while (size > 0) {
-    // Either we're not half-page aligned or we have less than a half
-    // page to write
-    if (size < page_size/2 || (destination & (page_size/2 - 1))) {
-      adiv5_ap_mem_write (ap, STM32L0_NVM_PECR, STM32L0_NVM_PECR_PROG);
-      size_t c = page_size/2 - (destination & (page_size/2 - 1));
-      if (c > size)
-        c = size;
-      size -= c;
-      c /= 4;
-      while (c--) {
-        uint32_t v = *source++;
-        adiv5_ap_mem_write (ap, destination, v);
-        destination += sizeof (v);
-      }
-
-      if (target_check_error (target))
-        return -1;
-    }
-    // Or we are writing a half-page
-    else {
-      adiv5_ap_mem_write (ap, STM32L0_NVM_PECR,
-                          STM32L0_NVM_PECR_PROG | STM32L0_NVM_PECR_FPRG);
-      size_t c = page_size/2;
-      size -= c;
-      c /= 4;
-      while (c--) {
-        uint32_t v = *source++;
-        adiv5_ap_mem_write (ap, destination, v);
-        destination += sizeof (v);
-      }
-
-      if (target_check_error (target))
-        return -1;
-    }
-  }
-
-  /* Wait for completion or an error */
-  while (1) {
-    uint32_t sr = adiv5_ap_mem_read (ap, STM32L0_NVM_SR);
-    if (target_check_error (target))
-      return -1;
-    if (sr & STM32L0_NVM_SR_BSY)
-      continue;
-    if ((sr & STM32L0_NVM_SR_ERR_M) || !(sr & STM32L0_NVM_SR_EOP))
-      return -1;
-    break;
   }
 
   return 0;
@@ -501,19 +417,15 @@ static int stm32l0_nvm_prog_write (struct target_s* target,
     when the MCU hasn't entered a fault state.  Once the MCU faults,
     this function will not succeed because the MCU will fault before
     executing a single instruction in the stub. */
-static int stm32l0_nvm_prog_write_stubbed (struct target_s* target,
+static int stm32lx_nvm_prog_write_stubbed (struct target_s* target,
                                            uint32_t destination,
                                            const uint8_t* source,
                                            int size)
 {
-  /* Skip stub if the MCU is in a questionable state or if the user
-     asks us to avoid stubs. */
-  volatile uint32_t regs[20];
-  target_regs_read (target, &regs);
-  if (inhibit_l0_stubs || (regs[16] & 0xf))
-    return stm32l0_nvm_prog_write (target, destination, source, size);
+  struct stm32lx_nvm_stub_info info;
+  const uint32_t nvm = stm32lx_nvm_phys (target);
+  const size_t page_size = stm32lx_nvm_prog_page_size (target);
 
-  struct stm32l0_nvm_stub_info info;
 //  static int attempts;
 
   /* We can't handle unaligned destination or non-word writes. */
@@ -532,10 +444,10 @@ static int stm32l0_nvm_prog_write_stubbed (struct target_s* target,
 //  if (!stm32l0_nvm_prog_data_unlock (adiv5_target_ap (target)))
 //    return -1;
 
-  info.page_size = STM32L0_NVM_PROG_PAGE_SIZE;
+  info.page_size = page_size;
 
   /* Load the stub */
-  target_mem_write_words (target, STM32L0_STUB_PHYS,
+  target_mem_write_words (target, STM32Lx_STUB_PHYS,
                           (void*) &stm32l0_nvm_prog_write_stub[0],
                           sizeof (stm32l0_nvm_prog_write_stub));
 
@@ -545,14 +457,14 @@ static int stm32l0_nvm_prog_write_stubbed (struct target_s* target,
        destination isn't half-page aligned.  This allows the
        sub to write the first partial half-page and then
        as many half-pages as will fit in the buffer. */
-    size_t max = STM32L0_STUB_DATA_MAX
+    size_t max = STM32Lx_STUB_DATA_MAX
       - (destination - (destination & ~(info.page_size/2 - 1)));
     size_t cb = size;
     if (cb > max)
       cb = max;
 
     /* Setup parameters */
-    info.source      = STM32L0_STUB_DATA_PHYS;
+    info.source      = STM32Lx_STUB_DATA_PHYS;
     info.destination = destination;
     info.size        = cb;
 
@@ -565,19 +477,19 @@ static int stm32l0_nvm_prog_write_stubbed (struct target_s* target,
     size -= cb;
 
     /* Copy parameters */
-    target_mem_write_words (target, STM32L0_STUB_INFO_PHYS,
+    target_mem_write_words (target, STM32Lx_STUB_INFO_PHYS,
                             (void*) &info, sizeof (info));
 
     /* Execute stub */
-    target_pc_write (target, STM32L0_STUB_PHYS);
+    target_pc_write (target, STM32Lx_STUB_PHYS);
     if (target_check_error (target))
       return -1;
     target_halt_resume (target, 0);
     while (!target_halt_wait (target))
       ;
 
-    if (adiv5_ap_mem_read (adiv5_target_ap (target), STM32L0_NVM_SR)
-        & STM32L0_NVM_SR_ERR_M)
+    if (adiv5_ap_mem_read (adiv5_target_ap (target), STM32Lx_NVM_SR(nvm))
+        & STM32Lx_NVM_SR_ERR_M)
       return -1;
   }
 
@@ -585,27 +497,276 @@ static int stm32l0_nvm_prog_write_stubbed (struct target_s* target,
 }
 
 
-/** Write to data flash using operations through the debug
-    interface.  *** FIXME: need to make this work with writing a
-    single byte as well as words. */
-static int stm32l0_nvm_data_write (struct target_s* target,
+/** Erase a region of NVM for STM32Lx.  This is the lead function and
+    it will invoke an implementation, stubbed or not depending on the
+    options and the range of addresses. */
+static int stm32lx_nvm_erase (struct target_s* target, uint32_t addr, int size)
+{
+  if (addr >= STM32Lx_NVM_EEPROM_PHYS)
+    return stm32lx_nvm_data_erase (target, addr, size);
+
+  /* Use stub if not inhibited, the MCU is in a non-exceptonal state
+     and there is stub. */
+  volatile uint32_t regs[20];
+  target_regs_read (target, &regs);
+  if (inhibit_stubs || (regs[16] & 0xf) || stm32lx_is_stm32l1 (target))
+    return stm32lx_nvm_prog_erase (target, addr, size);
+
+  return stm32lx_nvm_prog_erase_stubbed (target, addr, size);
+}
+
+
+/** Write to a region on NVM for STM32L1xx.  This is the lead function
+    and it will ibvoke an implementation, stubbed or not depending on
+    the options and the range of addresses. */
+static int stm32lx_nvm_write (struct target_s* target,
+                              uint32_t destination,
+                              const uint8_t* source,
+                              int size)
+{
+  if (destination >= STM32Lx_NVM_EEPROM_PHYS)
+    return stm32lx_nvm_data_write (target, destination, source, size);
+
+  /* Skip stub if the MCU is in a questionable state or if the user
+     asks us to avoid stubs. */
+  volatile uint32_t regs[20];
+  target_regs_read (target, &regs);
+  if (inhibit_stubs || (regs[16] & 0xf) || stm32lx_is_stm32l1 (target))
+    return stm32lx_nvm_prog_write (target, destination, source, size);
+
+  return stm32lx_nvm_prog_write_stubbed (target, destination, source, size);
+}
+
+
+/** Erase a region of program flash using operations through the debug
+    interface.  This is slower than stubbed versions (see NOTES).  The
+    flash array is erased for all pages from addr to addr+len
+    inclusive.  NVM register file address chosen from target. */
+static int stm32lx_nvm_prog_erase (struct target_s* target,
+                                   uint32_t addr, int len)
+{
+  ADIv5_AP_t* ap = adiv5_target_ap (target);
+  const size_t page_size = stm32lx_nvm_prog_page_size (target);
+  const uint32_t nvm = stm32lx_nvm_phys (target);
+
+  /* Word align */
+  len += (addr & 3);
+  addr &= ~3;
+
+  if (!stm32lx_nvm_prog_data_unlock (ap, nvm))
+    return -1;
+
+  /* Flash page erase instruction */
+  adiv5_ap_mem_write (ap, STM32Lx_NVM_PECR(nvm),
+                      STM32Lx_NVM_PECR_ERASE | STM32Lx_NVM_PECR_PROG);
+
+  {
+    uint32_t pecr = adiv5_ap_mem_read (ap, STM32Lx_NVM_PECR (nvm));
+    if ((pecr & (STM32Lx_NVM_PECR_PROG | STM32Lx_NVM_PECR_ERASE))
+        != (STM32Lx_NVM_PECR_PROG | STM32Lx_NVM_PECR_ERASE))
+      return -1;
+  }
+
+  /* Busy wait? *** FIXME: remove? */
+  while (adiv5_ap_mem_read (ap, STM32Lx_NVM_SR(nvm))
+         & STM32Lx_NVM_SR_BSY)
+    if (target_check_error(target))
+      return -1;
+
+  /* Clear errors.  *** FIXME: this only works when we wait for the
+     NVM block to complete the last operation. */
+  adiv5_ap_mem_write (ap, STM32Lx_NVM_SR (nvm), STM32Lx_NVM_SR_ERR_M);
+
+  while (len > 0) {
+    /* Write first word of page to 0 */
+    adiv5_ap_mem_write (ap, addr, 0);
+
+    len  -= page_size;
+    addr += page_size;
+  }
+
+  /* Disable further programming by locking PECR */
+  stm32lx_nvm_lock (ap, nvm);
+
+  /* Wait for completion or an error */
+  while (1) {
+    uint32_t sr = adiv5_ap_mem_read (ap, STM32Lx_NVM_SR(nvm));
+    if (target_check_error (target))
+      return -1;
+    if (sr & STM32Lx_NVM_SR_BSY)
+      continue;
+    if ((sr & STM32Lx_NVM_SR_ERR_M) || !(sr & STM32Lx_NVM_SR_EOP))
+      return -1;
+    break;
+  }
+
+  return 0;
+}
+
+
+/** Write to program flash using operations through the debug
+    interface.  This is slower than the stubbed write (see NOTES).
+    NVM register file address chosen from target. */
+static int stm32lx_nvm_prog_write (struct target_s* target,
                                    uint32_t destination,
                                    const uint8_t* source_8,
-
                                    int size)
 {
   ADIv5_AP_t* ap = adiv5_target_ap (target);
+  const uint32_t nvm = stm32lx_nvm_phys (target);
+  const bool is_stm32l1 = stm32lx_is_stm32l1 (target);
+
+  /* We can only handle word aligned writes and even word-multiple
+     ranges.  The stm32l0 cannot perform anything smaller than a word
+     write due to the ECC bits. */
+  if ((destination & 3) || (size & 3))
+    return -1;
+
+  if (!stm32lx_nvm_prog_data_unlock (ap, nvm))
+    return -1;
+
+  const size_t half_page_size = stm32lx_nvm_prog_page_size (target)/2;
+  uint32_t* source = (uint32_t*) source_8;
+
+  while (size > 0) {
+
+    /* Wait for BSY to clear because we cannot write the PECR until
+       the previous operation completes on STM32L1xx. */
+    while (adiv5_ap_mem_read (ap, STM32Lx_NVM_SR(nvm)) & STM32Lx_NVM_SR_BSY)
+      if (target_check_error(target)) {
+        return -1;
+      }
+
+    // Either we're not half-page aligned or we have less than a half
+    // page to write
+    if (size < half_page_size || (destination & (half_page_size - 1))) {
+      adiv5_ap_mem_write (ap, STM32Lx_NVM_PECR(nvm),
+                          is_stm32l1 ? 0 : STM32Lx_NVM_PECR_PROG);
+      size_t c = half_page_size - (destination & (half_page_size - 1));
+
+      if (c > size)
+        c = size;
+      size -= c;
+
+      target_mem_write_words (target, destination, source, c);
+      source += c/4;
+      destination += c;
+    }
+    // Or we are writing a half-page(s)
+    else {
+      adiv5_ap_mem_write (ap, STM32Lx_NVM_PECR (nvm),
+                          STM32Lx_NVM_PECR_PROG | STM32Lx_NVM_PECR_FPRG);
+
+      size_t c = size & ~(half_page_size - 1);
+      size -= c;
+      target_mem_write_words (target, destination, source, c);
+      source += c/4;
+      destination += c;
+    }
+  }
+
+  /* Disable further programming by locking PECR */
+  stm32lx_nvm_lock (ap, nvm);
+
+  /* Wait for completion or an error */
+  while (1) {
+    uint32_t sr = adiv5_ap_mem_read (ap, STM32Lx_NVM_SR (nvm));
+    if (target_check_error (target)) {
+      return -1;
+    }
+    if (sr & STM32Lx_NVM_SR_BSY)
+      continue;
+    if ((sr & STM32Lx_NVM_SR_ERR_M) || !(sr & STM32Lx_NVM_SR_EOP)) {
+      return -1;
+    }
+    break;
+  }
+
+  return 0;
+}
+
+
+/** Erase a region of data flash using operations through the debug
+    interface .  The flash is erased for all pages from addr to
+    addr+len, inclusive, on a word boundary.  NVM register file
+    address chosen from target. */
+static int stm32lx_nvm_data_erase (struct target_s* target,
+                                   uint32_t addr, int len)
+{
+  ADIv5_AP_t* ap = adiv5_target_ap (target);
+  const size_t page_size = stm32lx_nvm_data_page_size (target);
+  const uint32_t nvm = stm32lx_nvm_phys (target);
+
+  /* Word align */
+  len += (addr & 3);
+  addr &= ~3;
+
+  if (!stm32lx_nvm_prog_data_unlock (ap, nvm))
+    return -1;
+
+  /* Flash data erase instruction */
+  adiv5_ap_mem_write (ap, STM32Lx_NVM_PECR(nvm),
+                      STM32Lx_NVM_PECR_ERASE | STM32Lx_NVM_PECR_DATA);
+
+  {
+    uint32_t pecr = adiv5_ap_mem_read (ap, STM32Lx_NVM_PECR(nvm));
+    if ((pecr & (STM32Lx_NVM_PECR_ERASE | STM32Lx_NVM_PECR_DATA))
+        != (STM32Lx_NVM_PECR_ERASE | STM32Lx_NVM_PECR_DATA))
+      return -1;
+  }
+
+  while (len > 0) {
+    /* Write first word of page to 0 */
+    adiv5_ap_mem_write (ap, addr, 0);
+
+    len  -= page_size;
+    addr += page_size;
+  }
+
+  /* Disable further programming by locking PECR */
+  stm32lx_nvm_lock (ap, nvm);
+
+  /* Wait for completion or an error */
+  while (1) {
+    uint32_t sr = adiv5_ap_mem_read (ap, STM32Lx_NVM_SR (nvm));
+    if (target_check_error (target))
+      return -1;
+    if (sr & STM32Lx_NVM_SR_BSY)
+      continue;
+    if ((sr & STM32Lx_NVM_SR_ERR_M) || !(sr & STM32Lx_NVM_SR_EOP))
+      return -1;
+    break;
+  }
+
+  return 0;
+}
+
+
+/** Write to data flash using operations through the debug interface.
+    NVM register file address chosen from target.
+
+    *** FIXME: need to make this work with writing a single byte as
+    well as words. */
+static int stm32lx_nvm_data_write (struct target_s* target,
+                                   uint32_t destination,
+                                   const uint8_t* source_8,
+                                   int size)
+{
+  ADIv5_AP_t* ap = adiv5_target_ap (target);
+  const uint32_t nvm = stm32lx_nvm_phys (target);
+  const bool is_stm32l1 = stm32lx_is_stm32l1 (target);
 
   /* *** FIXME: need to make this work with writing a single byte. */
   if ((destination & 3) || (size & 3))
     return -1;
 
-  if (!stm32l0_nvm_prog_data_unlock (ap))
+  if (!stm32lx_nvm_prog_data_unlock (ap, nvm))
     return -1;
 
   uint32_t* source = (uint32_t*) source_8;
 
-  adiv5_ap_mem_write (ap, STM32L0_NVM_PECR, STM32L0_NVM_PECR_DATA);
+  adiv5_ap_mem_write (ap, STM32Lx_NVM_PECR(nvm),
+                      is_stm32l1 ? 0 : STM32Lx_NVM_PECR_DATA);
 
   while (size) {
     size -= 4;
@@ -617,14 +778,17 @@ static int stm32l0_nvm_data_write (struct target_s* target,
       return -1;
   }
 
+  /* Disable further programming by locking PECR */
+  stm32lx_nvm_lock (ap, nvm);
+
   /* Wait for completion or an error */
   while (1) {
-    uint32_t sr = adiv5_ap_mem_read (ap, STM32L0_NVM_SR);
+    uint32_t sr = adiv5_ap_mem_read (ap, STM32Lx_NVM_SR(nvm));
     if (target_check_error (target))
       return -1;
-    if (sr & STM32L0_NVM_SR_BSY)
+    if (sr & STM32Lx_NVM_SR_BSY)
       continue;
-    if ((sr & STM32L0_NVM_SR_ERR_M) || !(sr & STM32L0_NVM_SR_EOP))
+    if ((sr & STM32Lx_NVM_SR_ERR_M) || !(sr & STM32Lx_NVM_SR_EOP))
       return -1;
     break;
   }
@@ -639,20 +803,21 @@ static int stm32l0_nvm_data_write (struct target_s* target,
     format where the upper 16 bits are the 1s complement of the lower
     16 bits.  The funtion returns when the operation is complete.
     The return value is true if the write succeeded. */
-static bool stm32l0_option_write (target *t, uint32_t address, uint32_t value)
+static bool stm32lx_option_write (target *t, uint32_t address, uint32_t value)
 {
-  ADIv5_AP_t* ap = adiv5_target_ap(t);
+  ADIv5_AP_t*    ap  = adiv5_target_ap(t);
+  const uint32_t nvm = stm32lx_nvm_phys (t);
 
   /* Erase and program option in one go. */
-  adiv5_ap_mem_write (ap, STM32L0_NVM_PECR, STM32L0_NVM_PECR_FIX);
+  adiv5_ap_mem_write (ap, STM32Lx_NVM_PECR(nvm), STM32Lx_NVM_PECR_FIX);
   adiv5_ap_mem_write (ap, address, value);
 
   uint32_t sr;
   do {
-    sr = adiv5_ap_mem_read (ap, STM32L0_NVM_SR);
-  } while (sr & STM32L0_NVM_SR_BSY);
+    sr = adiv5_ap_mem_read (ap, STM32Lx_NVM_SR(nvm));
+  } while (sr & STM32Lx_NVM_SR_BSY);
 
-  return !(sr & STM32L0_NVM_SR_ERR_M);
+  return !(sr & STM32Lx_NVM_SR_ERR_M);
 }
 
 /** Write one eeprom value.  This version is more flexible than that
@@ -662,14 +827,20 @@ static bool stm32l0_option_write (target *t, uint32_t address, uint32_t value)
     complete.  The return value is true if the write succeeded.
     FWIW, byte writing isn't supported because the adiv5 layer
     doesn't support byte-level operations. */
-static bool stm32l0_eeprom_write (target *t, uint32_t address,
+static bool stm32lx_eeprom_write (target *t, uint32_t address,
                                   size_t cb, uint32_t value)
 {
-  ADIv5_AP_t* ap = adiv5_target_ap(t);
+  ADIv5_AP_t*    ap         = adiv5_target_ap(t);
+  const uint32_t nvm        = stm32lx_nvm_phys (t);
+  const bool     is_stm32l1 = stm32lx_is_stm32l1 (t);
+
+  /* Clear errors. */
+  adiv5_ap_mem_write (ap, STM32Lx_NVM_SR (nvm), STM32Lx_NVM_SR_ERR_M);
 
   /* Erase and program option in one go. */
-  adiv5_ap_mem_write (ap, STM32L0_NVM_PECR,
-                      STM32L0_NVM_PECR_DATA | STM32L0_NVM_PECR_FIX);
+  adiv5_ap_mem_write (ap, STM32Lx_NVM_PECR(nvm),
+                      (is_stm32l1 ? 0 : STM32Lx_NVM_PECR_DATA)
+                      | STM32Lx_NVM_PECR_FIX);
   if (cb == 4)
     adiv5_ap_mem_write (ap, address, value);
   else if (cb == 2)
@@ -679,13 +850,13 @@ static bool stm32l0_eeprom_write (target *t, uint32_t address,
 
   uint32_t sr;
   do {
-    sr = adiv5_ap_mem_read (ap, STM32L0_NVM_SR);
-  } while (sr & STM32L0_NVM_SR_BSY);
+    sr = adiv5_ap_mem_read (ap, STM32Lx_NVM_SR(nvm));
+  } while (sr & STM32Lx_NVM_SR_BSY);
 
-  return !(sr & STM32L0_NVM_SR_ERR_M);
+  return !(sr & STM32Lx_NVM_SR_ERR_M);
 }
 
-static bool stm32l0_cmd_stubs (target* t,
+static bool stm32lx_cmd_stubs (target* t,
                                int argc, char** argv)
 {
   if (argc == 1) {
@@ -694,11 +865,11 @@ static bool stm32l0_cmd_stubs (target* t,
   else if (argc == 2) {
     size_t cb = strlen (argv[1]);
     if (!strncasecmp (argv[1], "enable", cb))
-      inhibit_l0_stubs = 0;
+      inhibit_stubs = 0;
     if (!strncasecmp (argv[1], "disable", cb))
-      inhibit_l0_stubs = 1;
+      inhibit_stubs = 1;
   }
-  gdb_outf ("stubs: %sabled\n", inhibit_l0_stubs ? "dis" : "en");
+  gdb_outf ("stubs: %sabled\n", inhibit_stubs ? "dis" : "en");
 
   return true;
 }
@@ -708,7 +879,7 @@ static bool stm32l0_cmd_erase_mass (target* t, int argc , char** argv)
 {
   ADIv5_AP_t* ap = adiv5_target_ap (t);
 
-  stm32l0_nvm_opt_unlock (ap);
+  stm32lx_nvm_opt_unlock (ap);
 
   stm32l0_option_write (t, 0x1ff80000, 0xffff0000);
   adiv5_ap_mem_write (ap, STM32L0_NVM_PECR, STM32L0_NVM_PECR_OBL_LAUNCH);
@@ -735,11 +906,13 @@ static bool stm32l0_cmd_reset (target* t, int argc, char** argv)
 }
 #endif
 
-static bool stm32l0_cmd_option (target* t, int argc, char** argv)
+static bool stm32lx_cmd_option (target* t, int argc, char** argv)
 {
-  ADIv5_AP_t* ap = adiv5_target_ap (t);
+  ADIv5_AP_t*    ap       = adiv5_target_ap (t);
+  const uint32_t nvm      = stm32lx_nvm_phys (t);
+  const size_t   opt_size = stm32lx_nvm_option_size (t);
 
-  if (!stm32l0_nvm_opt_unlock (ap)) {
+  if (!stm32lx_nvm_opt_unlock (ap, nvm)) {
     gdb_out ("unable to unlock NVM option bytes\n");
     return true;
   }
@@ -747,17 +920,17 @@ static bool stm32l0_cmd_option (target* t, int argc, char** argv)
   size_t cb = strlen (argv[1]);
 
   if (argc == 2 && !strncasecmp (argv[1], "obl_launch", cb)) {
-    adiv5_ap_mem_write (ap, STM32L0_NVM_PECR, STM32L0_NVM_PECR_OBL_LAUNCH);
+    adiv5_ap_mem_write (ap, STM32Lx_NVM_PECR(nvm), STM32Lx_NVM_PECR_OBL_LAUNCH);
   }
   else if (argc == 4 && !strncasecmp (argv[1], "raw", cb)) {
     uint32_t addr = strtoul (argv[2], NULL, 0);
     uint32_t val  = strtoul (argv[3], NULL, 0);
     gdb_outf ("raw %08x <- %08x\n", addr, val);
-    if (addr < STM32L0_NVM_OPT_PHYS
-        || addr >= STM32L0_NVM_OPT_PHYS + STM32L0_NVM_OPT_SIZE
+    if (   addr <  STM32Lx_NVM_OPT_PHYS
+        || addr >= STM32Lx_NVM_OPT_PHYS + opt_size
         || (addr & 3))
       goto usage;
-    if (!stm32l0_option_write (t, addr, val))
+    if (!stm32lx_option_write (t, addr, val))
       gdb_out ("option write failed\n");
   }
   else if (argc == 4 && !strncasecmp (argv[1], "write", cb)) {
@@ -765,11 +938,11 @@ static bool stm32l0_cmd_option (target* t, int argc, char** argv)
     uint32_t val  = strtoul (argv[3], NULL, 0);
     val = (val & 0xffff) | ((~val & 0xffff) << 16);
     gdb_outf ("write %08x <- %08x\n", addr, val);
-    if (addr < STM32L0_NVM_OPT_PHYS
-        || addr >= STM32L0_NVM_OPT_PHYS + STM32L0_NVM_OPT_SIZE
+    if (   addr <  STM32Lx_NVM_OPT_PHYS
+        || addr >= STM32Lx_NVM_OPT_PHYS + opt_size
         || (addr & 3))
       goto usage;
-    if (!stm32l0_option_write (t, addr, val))
+    if (!stm32lx_option_write (t, addr, val))
       gdb_out ("option write failed\n");
   }
   else if (argc == 2 && !strncasecmp (argv[1], "show", cb))
@@ -778,15 +951,35 @@ static bool stm32l0_cmd_option (target* t, int argc, char** argv)
     goto usage;
 
   /* Report the current option values */
-  for (int i = 0; i < STM32L0_NVM_OPT_SIZE; i += sizeof (uint32_t)) {
-    uint32_t addr = STM32L0_NVM_OPT_PHYS + i;
+  for (int i = 0; i < opt_size; i += sizeof (uint32_t)) {
+    uint32_t addr = STM32Lx_NVM_OPT_PHYS + i;
     uint32_t val = adiv5_ap_mem_read (ap, addr);
     gdb_outf ("0x%08x: 0x%04x 0x%04x %s\n",
               addr, val & 0xffff, (val >> 16) & 0xffff,
               ((val & 0xffff) == ((~val >> 16) & 0xffff)) ? "OK" : "ERR");
   }
-  {
-    uint32_t optr   = adiv5_ap_mem_read (ap, STM32L0_NVM_OPTR);
+  if (stm32lx_is_stm32l1 (t)) {
+    uint32_t optr   = adiv5_ap_mem_read (ap, STM32Lx_NVM_OPTR(nvm));
+    uint8_t  rdprot = (optr >> STM32L1_NVM_OPTR_RDPROT_S)
+      & STM32L1_NVM_OPTR_RDPROT_M;
+    if (rdprot == STM32L1_NVM_OPTR_RDPROT_0)
+      rdprot = 0;
+    else if (rdprot == STM32L1_NVM_OPTR_RDPROT_2)
+      rdprot = 2;
+    else
+      rdprot = 1;
+    gdb_outf ("OPTR: 0x%08x, RDPRT %d, SPRMD %d, "
+              "BOR %d, WDG_SW %d, nRST_STP %d, nRST_STBY %d, nBFB2 %d\n",
+              optr, rdprot,
+              (optr &  STM32L1_NVM_OPTR_SPRMOD)     ? 1 : 0,
+              (optr >> STM32L1_NVM_OPTR_BOR_LEV_S) & STM32L1_NVM_OPTR_BOR_LEV_M,
+              (optr &  STM32L1_NVM_OPTR_WDG_SW)     ? 1 : 0,
+              (optr &  STM32L1_NVM_OPTR_nRST_STOP)  ? 1 : 0,
+              (optr &  STM32L1_NVM_OPTR_nRST_STDBY) ? 1 : 0,
+              (optr &  STM32L1_NVM_OPTR_nBFB2)      ? 1 : 0);
+  }
+  else {
+    uint32_t optr   = adiv5_ap_mem_read (ap, STM32Lx_NVM_OPTR(nvm));
     uint8_t  rdprot = (optr >> STM32L0_NVM_OPTR_RDPROT_S)
       & STM32L0_NVM_OPTR_RDPROT_M;
     if (rdprot == STM32L0_NVM_OPTR_RDPROT_0)
@@ -813,21 +1006,22 @@ static bool stm32l0_cmd_option (target* t, int argc, char** argv)
   gdb_out ("  raw <addr> <value32>   - Set option word\n");
   gdb_outf ("The value of <addr> must be word aligned and from 0x%08x "
             "to +0x%x\n",
-            STM32L0_NVM_OPT_PHYS,
-            STM32L0_NVM_OPT_PHYS + STM32L0_NVM_OPT_SIZE - sizeof (uint32_t));
+            STM32Lx_NVM_OPT_PHYS,
+            STM32Lx_NVM_OPT_PHYS + opt_size - sizeof (uint32_t));
 
  done:
-  stm32l0_nvm_lock (ap);
+  stm32lx_nvm_lock (ap, nvm);
   return true;
 }
 
 
-static bool stm32l0_cmd_eeprom (target* t, int argc, char** argv)
+static bool stm32lx_cmd_eeprom (target* t, int argc, char** argv)
 {
-  ADIv5_AP_t* ap = adiv5_target_ap (t);
+  ADIv5_AP_t*    ap  = adiv5_target_ap (t);
+  const uint32_t nvm = stm32lx_nvm_phys (t);
 
-  if (!stm32l0_nvm_opt_unlock (ap)) {
-    gdb_out ("unable to unlock NVM option bytes\n");
+  if (!stm32lx_nvm_prog_data_unlock (ap, nvm)) {
+    gdb_out ("unable to unlock EEPROM\n");
     return true;
   }
 
@@ -837,8 +1031,8 @@ static bool stm32l0_cmd_eeprom (target* t, int argc, char** argv)
     uint32_t addr = strtoul (argv[2], NULL, 0);
     uint32_t val  = strtoul (argv[3], NULL, 0);
 
-    if (   addr <  STM32L0_NVM_EEPROM_PHYS
-        || addr >= STM32L0_NVM_EEPROM_PHYS + STM32L0_NVM_EEPROM_SIZE)
+    if (   addr <  STM32Lx_NVM_EEPROM_PHYS
+        || addr >= STM32Lx_NVM_EEPROM_PHYS + stm32lx_nvm_eeprom_size (t))
       goto usage;
 
 #if 0
@@ -853,13 +1047,13 @@ static bool stm32l0_cmd_eeprom (target* t, int argc, char** argv)
         gdb_outf ("write halfword 0x%08x <- 0x%04x\n", addr, val);
         if (addr & 1)
           goto usage;
-        if (!stm32l0_eeprom_write (t, addr, 2, val))
+        if (!stm32lx_eeprom_write (t, addr, 2, val))
           gdb_out ("eeprom write failed\n");
       } else if (!strncasecmp (argv[1], "word", cb)) {
         gdb_outf ("write word 0x%08x <- 0x%08x\n", addr, val);
         if (addr & 3)
           goto usage;
-        if (!stm32l0_eeprom_write (t, addr, 4, val))
+        if (!stm32lx_eeprom_write (t, addr, 4, val))
           gdb_out ("eeprom write failed\n");
       }
       else
@@ -876,10 +1070,11 @@ static bool stm32l0_cmd_eeprom (target* t, int argc, char** argv)
   gdb_out ("  halfword <addr> <value16> - Write a half-word\n");
   gdb_out ("  word     <addr> <value32> - Write a word\n");
   gdb_outf ("The value of <addr> must in the interval [0x%08x, 0x%x)\n",
-            STM32L0_NVM_EEPROM_PHYS,
-            STM32L0_NVM_EEPROM_PHYS + STM32L0_NVM_EEPROM_SIZE);
+            STM32Lx_NVM_EEPROM_PHYS,
+            STM32Lx_NVM_EEPROM_PHYS
+            + stm32lx_nvm_eeprom_size (t));
 
  done:
-  stm32l0_nvm_lock (ap);
+  stm32lx_nvm_lock (ap, nvm);
   return true;
 }
